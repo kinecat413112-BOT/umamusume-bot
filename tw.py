@@ -10,7 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 備用圖片：僅在官網內頁完全沒有圖片時使用
+# 備用圖片：僅在官網內文完全沒有圖片時使用
 DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
@@ -60,57 +60,6 @@ def clean_content_text(text, pure_title):
         clean_lines.append(line_str)
 
     return "\n".join(clean_lines).strip()
-
-
-def extract_best_image(soup):
-    """全頁掃描圖片標籤與 CSS 背景圖，找出最可能是公告 Banner 的圖片"""
-    
-    # 移除導覽與頁尾，避免抓到選單圖
-    for s in soup(["nav", "header", "footer", "script", "style"]):
-        s.extract()
-
-    candidate_imgs = []
-
-    # 1. 抓取所有 <img> 標籤（含 src, data-src, lazy-src 等）
-    for img in soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or img.get("data-original") or ""
-        src = src.strip()
-        if src:
-            candidate_imgs.append(src)
-
-    # 2. 抓取帶有 style="background-image: url(...)" 的元素
-    for elem in soup.find_all(style=True):
-        style = elem["style"]
-        match = re.search(r'url\(([\'"]?)(.*?)\1\)', style, re.I)
-        if match:
-            candidate_imgs.append(match.group(2))
-
-    # 過濾並選出第一張合格的公告圖片
-    ignore_keywords = [
-        "logo", "icon", "nav", "btn", "share", "avatar", "footer", 
-        "header", "favicon", "bg_site", "common", "p-news__tab"
-    ]
-
-    for raw_url in candidate_imgs:
-        url_lower = raw_url.lower()
-        
-        # 排除包含選單、圖示關鍵字的圖片
-        if any(k in url_lower for k in ignore_keywords):
-            continue
-
-        # 補全完整 HTTP 網址
-        if raw_url.startswith("http"):
-            full_url = raw_url
-        elif raw_url.startswith("//"):
-            full_url = f"https:{raw_url}"
-        else:
-            full_url = f"https://uma.komoejoy.com{raw_url if raw_url.startswith('/') else '/' + raw_url}"
-
-        # 只要是包含圖片副檔名或含有 cms/news/upload/image 等資源目錄的即視為有效 Banner
-        if any(ext in url_lower for ext in [".jpg", ".png", ".jpeg", ".webp"]) or "upload" in url_lower or "cms" in url_lower:
-            return full_url
-
-    return ""
 
 
 def fetch_latest_news_with_playwright():
@@ -163,14 +112,19 @@ def fetch_latest_news_with_playwright():
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
-                    # 提高超時並等待 networkidle 確保動態圖片載入完畢
-                    detail_page.goto(news["link"], wait_until="networkidle", timeout=20000)
-                    detail_page.wait_for_timeout(4000)
+                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=20000)
                     
-                    detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
-                    detail_page.close()
+                    # 等待圖片標籤渲染出現在頁面上 (最多等 5 秒)
+                    try:
+                        detail_page.wait_for_selector("img", timeout=5000)
+                    except Exception:
+                        pass
 
                     # 1. 抓取文字摘要
+                    detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
+                    for s in detail_soup(["script", "style", "nav", "header", "footer"]):
+                        s.extract()
+
                     article_body = (
                         detail_soup.find("article") or
                         detail_soup.find("div", class_=re.compile(r"detail|content|article|news|main", re.I)) or
@@ -182,10 +136,31 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    # 2. 精準提取圖片 (全頁分析)
-                    found_img = extract_best_image(detail_soup)
+                    # 2. 直接由 Playwright 瀏覽器 DOM 提取所有 img 屬性
+                    img_srcs = detail_page.evaluate("""
+                        () => {
+                            const imgs = Array.from(document.querySelectorAll('img'));
+                            return imgs.map(img => img.src || img.getAttribute('data-src') || '').filter(Boolean);
+                        }
+                    """)
+
+                    detail_page.close()
+
+                    # 篩選出真正的公告 Banner 圖
+                    found_img = ""
+                    ignore_keywords = ["logo", "icon", "nav", "btn", "share", "avatar", "footer", "header", "favicon"]
+
+                    for src in img_srcs:
+                        src_lower = src.lower()
+                        if any(k in src_lower for k in ignore_keywords):
+                            continue
+                        
+                        # 符合圖片特徵即採用
+                        found_img = src
+                        break
+
                     news["image"] = found_img
-                    print(f"[Debug] 公告 [{news['title'][:10]}...] 解析圖片網址 ➔ {found_img if found_img else '未抓到 (將使用預設圖)'}")
+                    print(f"[Debug] 公告 [{news['title'][:10]}] 抓到圖片 ➔ {found_img if found_img else '無圖片 (套用預設大圖)'}")
 
                 except Exception as err:
                     print(f"[Warn] 內頁摘要/圖片抓取跳過 ({news['id']}): {err}")
@@ -224,7 +199,7 @@ def send_discord_webhook(news):
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已推播至 DC: {news['title']} (使用圖片: {img_url})")
+        print(f"[Success] 已推播至 DC: {news['title']} (圖片: {img_url})")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
