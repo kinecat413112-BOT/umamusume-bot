@@ -27,23 +27,35 @@ def save_sent_history(sent_set):
         json.dump(list(sent_set), f, ensure_ascii=False, indent=2)
 
 
-def clean_text(text):
-    """清理多餘空行與網頁導覽雜訊"""
+def clean_content_text(text, pure_title):
+    """清理多餘空行、網頁導覽雜訊並平滑斷句"""
     if not text:
         return ""
-    # 移除頁面導覽常見字詞
-    noise_patterns = [r"News", r"最新消息", r"Top", r"遊戲", r"詳情請點擊此處"]
+
+    # 移除頁面導覽常見無用字詞
+    noise_patterns = [
+        r"News", r"最新消息", r"Top", r"遊戲", 
+        r"詳情請點擊此處", r"遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}"
+    ]
+    
     lines = text.splitlines()
     clean_lines = []
+    
     for line in lines:
         line_str = line.strip()
         if not line_str:
             continue
-        # 排除純導覽字詞的行
-        if any(re.fullmatch(pattern, line_str, re.IGNORECASE) for pattern in noise_patterns):
+        # 過濾包含日期前綴或導覽關鍵字
+        if any(re.search(pattern, line_str, re.IGNORECASE) for pattern in noise_patterns):
+            continue
+        # 過濾與標題高度相似的重複文字
+        if line_str == pure_title or pure_title in line_str:
             continue
         clean_lines.append(line_str)
-    return "\n".join(clean_lines)
+
+    # 組合內文並平滑斷句（避免過多空行）
+    full_text = "\n".join(clean_lines)
+    return full_text.strip()
 
 
 def fetch_latest_news_with_playwright():
@@ -79,6 +91,10 @@ def fetch_latest_news_with_playwright():
 
                     link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                     
+                    # 剝離日期前綴與「詳情請點擊此處」，提取乾淨的純標題
+                    pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
+                    pure_title = pure_title.replace("詳情請點擊此處", "").strip()
+
                     # 抓取列表預覽圖
                     img_tag = a.find("img") or a.parent.find("img")
                     image_url = ""
@@ -86,12 +102,9 @@ def fetch_latest_news_with_playwright():
                         src = img_tag["src"]
                         image_url = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
 
-                    # 移除標題末端贅字
-                    clean_title = text.replace("詳情請點擊此處", "").strip()
-
                     news_list.append({
                         "id": str(news_id),
-                        "title": clean_title,
+                        "title": pure_title if pure_title else text,
                         "category": "遊戲公告",
                         "link": link,
                         "image": image_url,
@@ -100,21 +113,21 @@ def fetch_latest_news_with_playwright():
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 針對前 5 則公告，進內頁精準抓取精簡摘要與大圖
+            # 進內頁抓取完整內文與圖片 Banner
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
-                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=12000)
-                    detail_page.wait_for_timeout(1000)
+                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=15000)
+                    detail_page.wait_for_timeout(2000)
                     
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
                     detail_page.close()
 
-                    # 移除 Script, Style
+                    # 清理獨立樣式與腳本
                     for s in detail_soup(["script", "style"]):
                         s.extract()
 
-                    # 尋找文章內文主體
+                    # 提取主要文字區塊
                     article_body = (
                         detail_soup.find("article") or
                         detail_soup.find("div", class_=re.compile(r"content|detail|article", re.I)) or
@@ -123,19 +136,15 @@ def fetch_latest_news_with_playwright():
 
                     if article_body:
                         raw_text = article_body.get_text(separator="\n")
-                        cleaned = clean_text(raw_text)
+                        cleaned = clean_content_text(raw_text, news["title"])
                         
-                        # 移除內文中重複的標題
-                        if cleaned.startswith(news["title"]):
-                            cleaned = cleaned[len(news["title"]):].strip()
-
-                        # 精簡摘要：最多只取前 120 個字，避免過長洗頻
-                        if len(cleaned) > 120:
-                            news["description"] = cleaned[:117] + "..."
+                        # 限制摘要長度 (約 150 字)
+                        if len(cleaned) > 150:
+                            news["description"] = cleaned[:147] + "..."
                         else:
                             news["description"] = cleaned
 
-                    # 補抓圖片 Banner
+                    # 補抓內頁封面 Banner
                     if not news["image"]:
                         content_img = detail_soup.find("img")
                         if content_img and content_img.get("src"):
@@ -154,21 +163,22 @@ def fetch_latest_news_with_playwright():
 
 
 def send_discord_webhook(news):
-    """傳送精簡乾淨的 Discord 卡片"""
+    """傳送標題純文字、內文為藍字超連結的 Discord 卡片"""
     embed = {
-        "title": news["title"],
-        "url": news["link"],
-        "color": 15822180,  # 賽馬娘粉色
+        "title": news["title"],  # 標題改為純文字 (非藍字超連結)
+        "color": 15822180,       # 賽馬娘官方粉色
         "author": {
             "name": f"【{news['category']}】賽馬娘 Pretty Derby"
         }
     }
 
-    # 有內文摘要才放入
+    # 內文文字改為藍色超連結 (Markdown [內文](連結))
     if news.get("description"):
-        embed["description"] = news["description"]
+        embed["description"] = f"[{news['description']}]({news['link']})"
+    else:
+        embed["description"] = f"[點擊此處查看詳細公告...]({news['link']})"
 
-    # 有封面圖片才附上
+    # 附上內頁 Banner 圖片
     if news.get("image"):
         embed["image"] = {"url": news["image"]}
 
