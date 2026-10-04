@@ -1,1 +1,0 @@
-# umamusume-bot
