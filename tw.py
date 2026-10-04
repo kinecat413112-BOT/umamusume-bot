@@ -9,17 +9,22 @@ from playwright.sync_api import sync_playwright
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
-HOME_URL = "https://uma.komoejoy.com/"
 
-# 備用圖：可改為你自己上傳的 Imgur 圖床網址，或預設動態抓取
-FALLBACK_IMAGE_URL = "https://i.imgur.com/e2s3kF1.jpg"
+# 設定您提供的圖床連結做為備用圖片
+DEFAULT_IMAGE_URL = "https://duk.tw/Xaqm2l/p"
 
 
 def load_sent_history():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                content = f.read().strip()
+                if not content:
+                    return set()
+                return set(json.loads(content))
+        except json.JSONDecodeError:
+            print("[Info] 歷史紀錄檔為空或格式不符，將建立新的紀錄。")
+            return set()
         except Exception as e:
             print(f"[Warn] 讀取紀錄檔失敗: {e}")
             return set()
@@ -57,26 +62,6 @@ def clean_content_text(text, pure_title):
     return "\n".join(clean_lines).strip()
 
 
-def get_official_kv_image(context):
-    """造訪首頁動態抓取當前主視覺圖"""
-    try:
-        page = context.new_page()
-        page.goto(HOME_URL, wait_until="networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
-        soup = BeautifulSoup(page.content(), "html.parser")
-        page.close()
-
-        # 嘗試尋找主視覺 img 或背景圖
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if any(k in src.lower() for k in ["kv", "bg", "banner", "main", "top"]):
-                return src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
-    except Exception as e:
-        print(f"[Warn] 抓取官網首頁主視覺圖失敗: {e}")
-    
-    return FALLBACK_IMAGE_URL
-
-
 def fetch_latest_news_with_playwright():
     news_list = []
     
@@ -88,9 +73,6 @@ def fetch_latest_news_with_playwright():
             locale="zh-TW"
         )
         page = context.new_page()
-
-        # 預先抓取官網首頁的大圖做為預設備用圖
-        default_kv_image = get_official_kv_image(context)
 
         try:
             print(f"[Info] 前往官網列表: {TARGET_URL}")
@@ -113,9 +95,11 @@ def fetch_latest_news_with_playwright():
 
                     link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                     
+                    # 剝離日期前綴與「詳情請點擊此處」
                     pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
                     pure_title = pure_title.replace("詳情請點擊此處", "").strip()
 
+                    # 抓取列表預覽圖
                     img_tag = a.find("img") or a.parent.find("img")
                     image_url = ""
                     if img_tag and img_tag.get("src"):
@@ -132,7 +116,7 @@ def fetch_latest_news_with_playwright():
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 進入內頁抓取摘要與 Banner
+            # 進入內頁抓取摘要與圖片
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
@@ -161,19 +145,19 @@ def fetch_latest_news_with_playwright():
                         else:
                             news["description"] = cleaned
 
-                    # 若沒有專屬圖片，帶入備用首頁主視覺大圖
+                    # 嘗試抓取內頁公告的專屬圖片，若沒有則套用指定的圖片網址
                     if not news["image"]:
                         content_img = detail_soup.find("img")
                         if content_img and content_img.get("src"):
                             src = content_img["src"]
                             news["image"] = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
                         else:
-                            news["image"] = default_kv_image
+                            news["image"] = DEFAULT_IMAGE_URL
 
                 except Exception as err:
                     print(f"[Warn] 內頁摘要抓取跳過 ({news['id']}): {err}")
                     if not news["image"]:
-                        news["image"] = default_kv_image
+                        news["image"] = DEFAULT_IMAGE_URL
 
         except Exception as e:
             print(f"[Error] Playwright 執行失敗: {e}")
@@ -186,11 +170,14 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
+    # 確保無圖片時必定帶入設定的圖床網址
+    img_url = news.get("image") if news.get("image") else DEFAULT_IMAGE_URL
+
     embed = {
         "title": news["title"],
         "url": news["link"],
         "color": 15822180,       # 賽馬娘粉色
-        "image": {"url": news.get("image") or FALLBACK_IMAGE_URL}
+        "image": {"url": img_url}
     }
 
     if news.get("description"):
