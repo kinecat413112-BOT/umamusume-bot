@@ -138,13 +138,13 @@ def fetch_latest_news_with_playwright():
                         else:
                             news["description"] = cleaned
 
-                        # 2. 精確抓取內文真正的公告圖片 (排查 ICON、LOGO 與無效圖片)
+                        # 2. 抓取公告真正的圖片（僅過濾頂部 LOGO 與純圖示 ICON）
                         imgs = article_body.find_all("img")
                         found_image = ""
                         for img in imgs:
                             src = img.get("src", "")
-                            # 忽略長寬太小的小圖示或選單 LOGO
-                            if src and not any(k in src.lower() for k in ["logo", "icon", "nav", "btn", "bg_"]):
+                            # 只排除真正的全站選單/頁尾 LOGO 與系統圖示
+                            if src and not any(k in src.lower() for k in ["site-logo", "nav_logo", "favicon", "icon_"]):
                                 found_image = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
                                 break
                         
@@ -164,7 +164,6 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
-    # 邏輯判斷：若內頁有抓到原廠圖片則優先使用；若無（純文字公告）則自動改用預設圖片
     img_url = news.get("image", "").strip()
     if not img_url or not img_url.startswith("http"):
         img_url = DEFAULT_IMAGE_URL
