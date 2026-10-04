@@ -32,7 +32,6 @@ def clean_content_text(text, pure_title):
     if not text:
         return ""
 
-    # 移除頁面導覽常見無用字詞
     noise_patterns = [
         r"News", r"最新消息", r"Top", r"遊戲", 
         r"詳情請點擊此處", r"遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}"
@@ -45,17 +44,13 @@ def clean_content_text(text, pure_title):
         line_str = line.strip()
         if not line_str:
             continue
-        # 過濾包含日期前綴或導覽關鍵字
         if any(re.search(pattern, line_str, re.IGNORECASE) for pattern in noise_patterns):
             continue
-        # 過濾與標題高度相似的重複文字
         if line_str == pure_title or pure_title in line_str:
             continue
         clean_lines.append(line_str)
 
-    # 組合內文並平滑斷句（避免過多空行）
-    full_text = "\n".join(clean_lines)
-    return full_text.strip()
+    return "\n".join(clean_lines).strip()
 
 
 def fetch_latest_news_with_playwright():
@@ -91,7 +86,7 @@ def fetch_latest_news_with_playwright():
 
                     link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                     
-                    # 剝離日期前綴與「詳情請點擊此處」，提取乾淨的純標題
+                    # 剝離日期前綴與「詳情請點擊此處」
                     pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
                     pure_title = pure_title.replace("詳情請點擊此處", "").strip()
 
@@ -105,7 +100,6 @@ def fetch_latest_news_with_playwright():
                     news_list.append({
                         "id": str(news_id),
                         "title": pure_title if pure_title else text,
-                        "category": "遊戲公告",
                         "link": link,
                         "image": image_url,
                         "description": ""
@@ -113,7 +107,7 @@ def fetch_latest_news_with_playwright():
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 進內頁抓取完整內文與圖片 Banner
+            # 進入內頁抓取摘要與 Banner
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
@@ -123,11 +117,9 @@ def fetch_latest_news_with_playwright():
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
                     detail_page.close()
 
-                    # 清理獨立樣式與腳本
                     for s in detail_soup(["script", "style"]):
                         s.extract()
 
-                    # 提取主要文字區塊
                     article_body = (
                         detail_soup.find("article") or
                         detail_soup.find("div", class_=re.compile(r"content|detail|article", re.I)) or
@@ -138,13 +130,12 @@ def fetch_latest_news_with_playwright():
                         raw_text = article_body.get_text(separator="\n")
                         cleaned = clean_content_text(raw_text, news["title"])
                         
-                        # 限制摘要長度 (約 150 字)
+                        # 限制摘要長度
                         if len(cleaned) > 150:
                             news["description"] = cleaned[:147] + "..."
                         else:
                             news["description"] = cleaned
 
-                    # 補抓內頁封面 Banner
                     if not news["image"]:
                         content_img = detail_soup.find("img")
                         if content_img and content_img.get("src"):
@@ -163,26 +154,27 @@ def fetch_latest_news_with_playwright():
 
 
 def send_discord_webhook(news):
-    """傳送標題純文字、內文為藍字超連結的 Discord 卡片"""
+    """發送完全比照怪物彈珠格式的 Discord 推播"""
+
     embed = {
-        "title": news["title"],  # 標題改為純文字 (非藍字超連結)
-        "color": 15822180,       # 賽馬娘官方粉色
-        "author": {
-            "name": f"【{news['category']}】賽馬娘 Pretty Derby"
-        }
+        "title": news["title"],  # 藍字超連結標題
+        "url": news["link"],
+        "color": 15822180,       # 賽馬娘粉色
     }
 
-    # 內文文字改為藍色超連結 (Markdown [內文](連結))
+    # 內文為純文字摘要（非藍字超連結）
     if news.get("description"):
-        embed["description"] = f"[{news['description']}]({news['link']})"
-    else:
-        embed["description"] = f"[點擊此處查看詳細公告...]({news['link']})"
+        embed["description"] = news["description"]
 
-    # 附上內頁 Banner 圖片
+    # 附上大圖
     if news.get("image"):
         embed["image"] = {"url": news["image"]}
 
-    payload = {"embeds": [embed]}
+    # content: 外層單獨列出的標題純文字
+    payload = {
+        "content": news["title"],
+        "embeds": [embed]
+    }
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
