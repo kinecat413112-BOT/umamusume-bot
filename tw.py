@@ -10,7 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 備用圖片：當列表頁面的卡片本身沒有圖片時使用
+# 備用圖片：當列表頁面的卡片本身完全沒有圖片時才使用
 DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
@@ -79,28 +79,61 @@ def fetch_latest_news_with_playwright():
             page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
 
-            # 1. 在列表頁面直接分析 DOM 卡片元素
-            # 透過 Playwright 抓取列表頁的所有新聞區塊及其內部的 img 圖片與連結
+            # 在列表頁精準抓取卡片與對應的 Banner 圖片
             cards_data = page.evaluate("""
                 () => {
                     const results = [];
-                    // 尋找列表頁上的新聞連結
+                    // 取得所有帶有 id 或 detail 的公告連結
                     const links = Array.from(document.querySelectorAll('a[href*="detail"], a[href*="id="]'));
                     
                     links.forEach(a => {
                         const href = a.getAttribute('href');
-                        // 找到該卡片區塊容器 (向上尋找最近的卡片或父級容器)
-                        const container = a.closest('li') || a.closest('div') || a;
-                        // 檢查卡片內部是否有 Banner 圖片
-                        const img = container.querySelector('img');
-                        const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+                        // 找到目前卡片最外層容器
+                        let container = a;
+                        for (let i = 0; i < 4; i++) {
+                            if (container.parentElement && container.tagName !== 'LI' && container.tagName !== 'BODY') {
+                                container = container.parentElement;
+                            }
+                        }
+
+                        let foundImg = '';
+
+                        // 1. 尋找卡片內的 img 標籤
+                        const imgs = Array.from(container.querySelectorAll('img'));
+                        for (let img of imgs) {
+                            let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
+                            if (src && !src.includes('logo') && !src.includes('favicon') && !src.includes('nav')) {
+                                foundImg = src;
+                                break;
+                            }
+                        }
+
+                        // 2. 如果沒有 img，尋找 CSS background-image
+                        if (!foundImg) {
+                            const bgElems = Array.from(container.querySelectorAll('*'));
+                            for (let elem of bgElems) {
+                                const style = window.getComputedStyle(elem);
+                                const bgImg = style.backgroundImage;
+                                if (bgImg && bgImg !== 'none' && bgImg.includes('url')) {
+                                    const match = bgImg.match(/url\\(["']?(.*?)["']?\\)/);
+                                    if (match && match[1]) {
+                                        let url = match[1];
+                                        if (!url.includes('logo') && !url.includes('favicon')) {
+                                            foundImg = url;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         const text = a.innerText || container.innerText;
 
                         if (href) {
                             results.push({
                                 href: href,
                                 text: text,
-                                card_img: imgSrc
+                                card_img: foundImg
                             });
                         }
                     });
@@ -122,26 +155,31 @@ def fetch_latest_news_with_playwright():
 
                 link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                 
-                # 整理乾淨的標題
+                # 整理標題
                 pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
                 pure_title = pure_title.replace("詳情請點擊此處", "").strip()
 
-                # 排除非 Banner 的系統雜圖 (如 logo, icon 等)
-                final_card_img = ""
-                if card_img and not any(k in card_img.lower() for k in ["logo", "icon", "nav", "loading", "btn"]):
-                    final_card_img = card_img
+                # 補全完整圖片網址
+                final_img = ""
+                if card_img:
+                    if card_img.startswith("http"):
+                        final_img = card_img
+                    elif card_img.startswith("//"):
+                        final_img = f"https:{card_img}"
+                    else:
+                        final_img = f"https://uma.komoejoy.com{card_img if card_img.startswith('/') else '/' + card_img}"
 
                 news_list.append({
                     "id": str(news_id),
                     "title": pure_title if pure_title else text,
                     "link": link,
-                    "image": final_card_img, # 這是列表頁抓到的 Banner
+                    "image": final_img,
                     "description": ""
                 })
 
-            print(f"[Success] 成功從列表頁解析出 {len(news_list)} 則公告！")
+            print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 2. 進入內頁「只抓取文字」，完全不抓圖片
+            # 進入內頁「只抓取文字」，不觸碰圖片
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
@@ -151,7 +189,6 @@ def fetch_latest_news_with_playwright():
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
                     detail_page.close()
 
-                    # 清除干擾標籤
                     for s in detail_soup(["script", "style", "nav", "header", "footer"]):
                         s.extract()
 
@@ -166,7 +203,7 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    print(f"[Debug] 公告 [{news['title'][:10]}] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (將使用預設圖)'}")
+                    print(f"[Debug] 公告 [{news['title'][:12]}...] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (套用預設大圖)'}")
 
                 except Exception as err:
                     print(f"[Warn] 內頁摘要抓取跳過 ({news['id']}): {err}")
@@ -182,7 +219,6 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
-    # 如果列表卡片有圖就用卡片的圖，沒圖則自動帶入預設圖片
     img_url = news.get("image", "").strip()
     if not img_url or not img_url.startswith("http"):
         img_url = DEFAULT_IMAGE_URL
