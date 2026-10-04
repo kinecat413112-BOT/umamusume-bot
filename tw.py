@@ -70,45 +70,52 @@ def fetch_latest_news_with_playwright():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="zh-TW"
+            locale="zh-TW",
+            viewport={"width": 1280, "height": 800}
         )
         page = context.new_page()
 
         try:
             print(f"[Info] 前往官網列表: {TARGET_URL}")
             page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
+            
+            # 【關鍵】滾動頁面觸發圖片 Lazy Loading，確保高清大圖完成渲染
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(2000)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(1000)
 
             # 在列表頁精準抓取卡片與對應的 Banner 圖片
             cards_data = page.evaluate("""
                 () => {
                     const results = [];
-                    // 取得所有帶有 id 或 detail 的公告連結
                     const links = Array.from(document.querySelectorAll('a[href*="detail"], a[href*="id="]'));
                     
                     links.forEach(a => {
                         const href = a.getAttribute('href');
-                        // 找到目前卡片最外層容器
-                        let container = a;
-                        for (let i = 0; i < 4; i++) {
-                            if (container.parentElement && container.tagName !== 'LI' && container.tagName !== 'BODY') {
-                                container = container.parentElement;
-                            }
-                        }
+                        // 找到該條目最精準的卡片外框 (通常是 <li> 或帶有特定 class 的區塊)
+                        let container = a.closest('li') || a.closest('.news-item') || a.parentElement;
+                        if (!container) container = a;
 
                         let foundImg = '';
 
-                        // 1. 尋找卡片內的 img 標籤
+                        // 1. 搜尋卡片內的 <img> 標籤，並過濾掉尺寸過小者 (排斥小 Icon、Logo)
                         const imgs = Array.from(container.querySelectorAll('img'));
                         for (let img of imgs) {
-                            let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
-                            if (src && !src.includes('logo') && !src.includes('favicon') && !src.includes('nav')) {
-                                foundImg = src;
-                                break;
+                            let src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
+                            
+                            // 排除標誌、Icon 與圖示
+                            if (src && !src.includes('logo') && !src.includes('favicon') && !src.includes('icon')) {
+                                // 檢查圖片渲染後的真實寬度/自然寬度
+                                const width = img.clientWidth || img.naturalWidth || 0;
+                                if (width > 100 || width === 0) { 
+                                    foundImg = src;
+                                    break;
+                                }
                             }
                         }
 
-                        // 2. 如果沒有 img，尋找 CSS background-image
+                        // 2. 若無 <img>，尋找 CSS background-image
                         if (!foundImg) {
                             const bgElems = Array.from(container.querySelectorAll('*'));
                             for (let elem of bgElems) {
@@ -118,7 +125,7 @@ def fetch_latest_news_with_playwright():
                                     const match = bgImg.match(/url\\(["']?(.*?)["']?\\)/);
                                     if (match && match[1]) {
                                         let url = match[1];
-                                        if (!url.includes('logo') && !url.includes('favicon')) {
+                                        if (!url.includes('logo') && !url.includes('favicon') && !url.includes('icon')) {
                                             foundImg = url;
                                             break;
                                         }
@@ -155,11 +162,11 @@ def fetch_latest_news_with_playwright():
 
                 link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                 
-                # 整理標題
+                # 清理標題
                 pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
                 pure_title = pure_title.replace("詳情請點擊此處", "").strip()
 
-                # 補全完整圖片網址
+                # 補全完整圖片 URL
                 final_img = ""
                 if card_img:
                     if card_img.startswith("http"):
@@ -179,7 +186,7 @@ def fetch_latest_news_with_playwright():
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 進入內頁「只抓取文字」，不觸碰圖片
+            # 進入內頁「僅抓取內文文字摘要」
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
@@ -203,7 +210,7 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    print(f"[Debug] 公告 [{news['title'][:12]}...] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (套用預設大圖)'}")
+                    print(f"[Debug] 公告 [{news['title'][:12]}...] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (帶入預設大圖)'}")
 
                 except Exception as err:
                     print(f"[Warn] 內頁摘要抓取跳過 ({news['id']}): {err}")
