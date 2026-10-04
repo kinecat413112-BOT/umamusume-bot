@@ -10,8 +10,8 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 設定為您 duk.tw 圖床的直接圖片連結 (.png)
-DEFAULT_IMAGE_URL = "https://duk.tw/Xaqm2l.png"
+# 設定 Postimages 的圖片直接連結
+DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
 def load_sent_history():
@@ -145,7 +145,7 @@ def fetch_latest_news_with_playwright():
                         else:
                             news["description"] = cleaned
 
-                    # 嘗試抓取內頁公告專屬圖片，若無則帶入 duk.tw 的直連圖
+                    # 嘗試抓取內頁公告專屬圖片，若無則帶入指定的 Postimages 圖片
                     if not news["image"]:
                         content_img = detail_soup.find("img")
                         if content_img and content_img.get("src"):
