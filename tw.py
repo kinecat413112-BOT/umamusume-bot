@@ -248,7 +248,7 @@ def fetch_latest_news_with_playwright():
 
 
 def send_discord_webhook(news):
-    """發送 Discord 推播"""
+    """發送 Discord 推播（包含頂部純文字標題與卡片）"""
 
     img_url = news.get("image", "").strip()
     if not img_url or not img_url.startswith("http"):
@@ -266,8 +266,9 @@ def send_discord_webhook(news):
     else:
         embed["description"] = "點擊標題查看詳細公告..."
 
-    # 【關鍵修正】移除了 outer content 訊息，避免在嵌入框上方多跳一行純文字標題與時間
+    # 包含 content 欄位，推播上方會多出一行乾淨的標題文字
     payload = {
+        "content": news["title"],
         "embeds": [embed]
     }
 
