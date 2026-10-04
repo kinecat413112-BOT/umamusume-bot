@@ -111,8 +111,9 @@ def fetch_latest_news_with_playwright():
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
-                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=15000)
-                    detail_page.wait_for_timeout(2000)
+                    # 改為 networkidle，確保網頁所有 AJAX 請求與圖片載入完畢
+                    detail_page.goto(news["link"], wait_until="networkidle", timeout=15000)
+                    detail_page.wait_for_timeout(3500)
                     
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
                     detail_page.close()
@@ -120,9 +121,11 @@ def fetch_latest_news_with_playwright():
                     for s in detail_soup(["script", "style"]):
                         s.extract()
 
+                    # 擴大內文搜尋範圍（包含常見的內文容器）
                     article_body = (
                         detail_soup.find("article") or
-                        detail_soup.find("div", class_=re.compile(r"content|detail|article", re.I)) or
+                        detail_soup.find("div", class_=re.compile(r"content|detail|article|news|main|text|p-", re.I)) or
+                        detail_soup.find("main") or
                         detail_soup.body
                     )
 
@@ -154,7 +157,7 @@ def fetch_latest_news_with_playwright():
 
 
 def send_discord_webhook(news):
-    """發送完全比照怪物彈珠格式的 Discord 推播"""
+    """發送 Discord 推播"""
 
     embed = {
         "title": news["title"],  # 藍字超連結標題
@@ -162,9 +165,11 @@ def send_discord_webhook(news):
         "color": 15822180,       # 賽馬娘粉色
     }
 
-    # 內文為純文字摘要（非藍字超連結）
+    # 內文處理：若抓到了文字則呈現摘要，若沒抓到則帶入連結提示
     if news.get("description"):
         embed["description"] = news["description"]
+    else:
+        embed["description"] = "點擊標題查看詳細公告..."
 
     # 附上大圖
     if news.get("image"):
