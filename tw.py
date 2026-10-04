@@ -27,7 +27,7 @@ def save_sent_history(sent_set):
 
 
 def fetch_latest_news_with_playwright():
-    """使用真實瀏覽器載入頁面，繞過防火牆與動態渲染問題"""
+    """使用 Playwright 模擬真實瀏覽器解析新聞，並抓取內頁圖片"""
     news_list = []
     
     with sync_playwright() as p:
@@ -42,14 +42,11 @@ def fetch_latest_news_with_playwright():
         try:
             print(f"[Info] 前往官網: {TARGET_URL}")
             page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)  # 等待 DOM 動態渲染完成
+            page.wait_for_timeout(3000)
 
-            # 抓取渲染後的完整 HTML
             html = page.content()
             soup = BeautifulSoup(html, "html.parser")
 
-            # 解析新聞列表中所有的 <a> 標籤或新聞卡片
-            # 尋找帶有 news_detail 或 id 參數的連結
             anchors = soup.find_all("a")
             seen_ids = set()
 
@@ -59,22 +56,48 @@ def fetch_latest_news_with_playwright():
 
                 if "id=" in href or "detail" in href:
                     news_id = href.split("id=")[-1] if "id=" in href else href
-                    if news_id in seen_ids or not text:
+                    if news_id in seen_ids or not text or len(text) < 3:
                         continue
                     seen_ids.add(news_id)
 
                     link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                     
+                    # 嘗試抓取公告列表卡片內的預覽圖
+                    img_tag = a.find("img") or a.parent.find("img")
+                    image_url = ""
+                    if img_tag and img_tag.get("src"):
+                        src = img_tag["src"]
+                        image_url = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
+
                     news_list.append({
                         "id": str(news_id),
                         "title": text,
                         "category": "遊戲公告",
-                        "date": "",
                         "link": link,
-                        "image": ""
+                        "image": image_url
                     })
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
+
+            # 針對前 3 則最新新聞，若沒圖片則點進內頁補抓封面圖
+            for news in news_list[:3]:
+                if not news["image"]:
+                    try:
+                        print(f"[Info] 前往公告內頁補抓圖片: {news['id']}")
+                        detail_page = context.new_page()
+                        detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=15000)
+                        detail_page.wait_for_timeout(1500)
+                        
+                        detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
+                        detail_page.close()
+
+                        # 尋找內頁文章中的第一張大圖
+                        content_img = detail_soup.find("img")
+                        if content_img and content_img.get("src"):
+                            src = content_img["src"]
+                            news["image"] = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
+                    except Exception as err:
+                        print(f"[Warn] 內頁圖片抓取失敗 ({news['id']}): {err}")
 
         except Exception as e:
             print(f"[Error] Playwright 執行失敗: {e}")
@@ -85,18 +108,23 @@ def fetch_latest_news_with_playwright():
 
 
 def send_discord_webhook(news):
+    """傳送漂亮的 Discord 卡片"""
     embed = {
         "title": news["title"],
         "url": news["link"],
-        "color": 15822180,  # 賽馬娘品牌粉色
+        "color": 15822180,  # 賽馬娘官方粉色
         "author": {
-            "name": f"【{news['category']}】賽馬娘 Pretty Derby 最新公告",
-            "icon_url": "https://uma.komoejoy.com/favicon.ico"
+            "name": f"【{news['category']}】賽馬娘 Pretty Derby",
+            "icon_url": "https://patchwiki.biligame.com/images/umamusume/thumb/0/08/s49o49q0o2m834vsh47kxg5s3h91m45.png/120px-%E6%B8%B8%E6%88%8F%E4%BF%A1%E6%81%AF%E5%9B%BE%E6%A0%87.png"
         },
         "footer": {
             "text": "賽馬娘繁中版公告自動推播"
         }
     }
+
+    # 如果有圖片則附上附圖
+    if news["image"]:
+        embed["image"] = {"url": news["image"]}
 
     payload = {"embeds": [embed]}
 
