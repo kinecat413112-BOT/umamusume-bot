@@ -10,7 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 備用圖片：僅在官網內文完全沒有圖片時使用
+# 備用圖片：僅在官網內文完全沒有圖片（或只有 Loading 圖）時使用
 DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
@@ -112,13 +112,10 @@ def fetch_latest_news_with_playwright():
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
-                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=20000)
+                    detail_page.goto(news["link"], wait_until="networkidle", timeout=20000)
                     
-                    # 等待圖片標籤渲染出現在頁面上 (最多等 5 秒)
-                    try:
-                        detail_page.wait_for_selector("img", timeout=5000)
-                    except Exception:
-                        pass
+                    # 多等待 3 秒讓 Loading 遮罩消失與文章內容載入完成
+                    detail_page.wait_for_timeout(3000)
 
                     # 1. 抓取文字摘要
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
@@ -136,7 +133,7 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    # 2. 直接由 Playwright 瀏覽器 DOM 提取所有 img 屬性
+                    # 2. 由 Playwright DOM 提取所有 img 屬性
                     img_srcs = detail_page.evaluate("""
                         () => {
                             const imgs = Array.from(document.querySelectorAll('img'));
@@ -146,16 +143,25 @@ def fetch_latest_news_with_playwright():
 
                     detail_page.close()
 
-                    # 篩選出真正的公告 Banner 圖
+                    # 篩選出真正的公告 Banner 圖（徹底排除 Loading 及選單圖）
                     found_img = ""
-                    ignore_keywords = ["logo", "icon", "nav", "btn", "share", "avatar", "footer", "header", "favicon"]
+                    ignore_keywords = [
+                        "logo", "icon", "nav", "btn", "share", "avatar", 
+                        "footer", "header", "favicon", "loading", "loader", "load"
+                    ]
 
                     for src in img_srcs:
                         src_lower = src.lower()
+                        
+                        # 1. 排除關鍵字（含有 loading、logo、icon 等）
                         if any(k in src_lower for k in ignore_keywords):
                             continue
                         
-                        # 符合圖片特徵即採用
+                        # 2. 排除 GIF 動圖（因為 Loading 圖皆為 GIF）
+                        if src_lower.endswith(".gif") or ".gif?" in src_lower:
+                            continue
+
+                        # 符合非 GIF 的靜態大圖（.png / .jpg / .jpeg / .webp）即採用
                         found_img = src
                         break
 
