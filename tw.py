@@ -10,7 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 備用圖片：僅在官網公告完全沒有圖片時使用
+# 備用圖片：僅在官網內文完全沒有圖片時使用
 DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
@@ -108,7 +108,7 @@ def fetch_latest_news_with_playwright():
 
             print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
 
-            # 進入內頁抓取摘要與圖片
+            # 進入內頁抓取內文摘要與真正的 Banner 圖
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
@@ -118,12 +118,14 @@ def fetch_latest_news_with_playwright():
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
                     detail_page.close()
 
-                    for s in detail_soup(["script", "style"]):
+                    # 移除無關腳本與樣式
+                    for s in detail_soup(["script", "style", "nav", "header", "footer"]):
                         s.extract()
 
+                    # 定位主要文章內容區域
                     article_body = (
                         detail_soup.find("article") or
-                        detail_soup.find("div", class_=re.compile(r"content|detail|article|news|main|text|p-", re.I)) or
+                        detail_soup.find("div", class_=re.compile(r"detail|content|article|news-detail", re.I)) or
                         detail_soup.find("main") or
                         detail_soup.body
                     )
@@ -138,16 +140,34 @@ def fetch_latest_news_with_playwright():
                         else:
                             news["description"] = cleaned
 
-                        # 2. 抓取公告真正的圖片（僅過濾頂部 LOGO 與純圖示 ICON）
+                        # 2. 搜尋內文中的所有圖片標籤 <img>
                         imgs = article_body.find_all("img")
                         found_image = ""
+
                         for img in imgs:
-                            src = img.get("src", "")
-                            # 只排除真正的全站選單/頁尾 LOGO 與系統圖示
-                            if src and not any(k in src.lower() for k in ["site-logo", "nav_logo", "favicon", "icon_"]):
-                                found_image = src if src.startswith("http") else f"https://uma.komoejoy.com{src}"
-                                break
-                        
+                            src = img.get("src") or img.get("data-src") or ""
+                            src = src.strip()
+
+                            if not src:
+                                continue
+
+                            src_lower = src.lower()
+                            # 排除選單、LOGO、按鈕、圖示等無關圖片
+                            ignore_keywords = ["logo", "icon", "nav", "btn", "share", "avatar", "footer", "header"]
+                            if any(k in src_lower for k in ignore_keywords):
+                                continue
+
+                            # 補全完整 HTTP 網址
+                            if src.startswith("http"):
+                                found_image = src
+                            elif src.startswith("//"):
+                                found_image = f"https:{src}"
+                            else:
+                                found_image = f"https://uma.komoejoy.com{src if src.startswith('/') else '/' + src}"
+
+                            # 找到第一張真正的公告圖片就離開迴圈
+                            break
+
                         news["image"] = found_image
 
                 except Exception as err:
@@ -164,6 +184,7 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
+    # 判斷邏輯：有抓到內頁活動圖就用內頁圖；若無則自動帶入預設大圖
     img_url = news.get("image", "").strip()
     if not img_url or not img_url.startswith("http"):
         img_url = DEFAULT_IMAGE_URL
@@ -187,7 +208,7 @@ def send_discord_webhook(news):
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已推播至 DC: {news['title']} (使用圖片: {img_url})")
+        print(f"[Success] 已推播至 DC: {news['title']} (圖片網址: {img_url})")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
