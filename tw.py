@@ -2,18 +2,15 @@ import json
 import os
 import sys
 import requests
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
-# 設定檔
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
-
-# Komoe 繁中版賽馬娘官方 API 結構
-NEWS_PAGE_URL = "https://uma.komoejoy.com/news?t=all"
-API_URL = "https://uma.komoejoy.com/api/news/list"
+TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
 
 def load_sent_history():
-    """載入已發送過的新聞 ID 紀錄"""
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -25,141 +22,87 @@ def load_sent_history():
 
 
 def save_sent_history(sent_set):
-    """儲存最新發送紀錄"""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(list(sent_set), f, ensure_ascii=False, indent=2)
 
 
-def fetch_latest_news():
-    """模擬官網前端請求，獲取最新新聞列表"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://uma.komoejoy.com/news?t=all",
-        "Origin": "https://uma.komoejoy.com",
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json;charset=UTF-8"
-    }
-
+def fetch_latest_news_with_playwright():
+    """使用真實瀏覽器載入頁面，繞過防火牆與動態渲染問題"""
     news_list = []
-
-    # 方式 A：GET 請求
-    try:
-        print("[Info] 嘗試以 GET 方式請求官方 API...")
-        res = requests.get(
-            API_URL, 
-            params={"page": 1, "pageSize": 10, "type": "all", "t": "all"}, 
-            headers=headers, 
-            timeout=15
+    
+    with sync_playwright() as p:
+        print("[Info] 啟動 Playwright 瀏覽器...")
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="zh-TW"
         )
-        print(f"[Info] GET 回應碼: {res.status_code}")
-        
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", {})
-            if isinstance(items, dict):
-                items = items.get("list", [])
-            elif not isinstance(items, list):
-                items = []
+        page = context.new_page()
 
-            for item in items:
-                news_id = str(item.get("id") or item.get("news_id") or "")
-                if not news_id:
-                    continue
-                title = item.get("title", "無標題")
-                category = item.get("category_name") or item.get("type_name") or "遊戲"
-                publish_time = item.get("publish_time") or item.get("date") or ""
-                cover_image = item.get("cover") or item.get("image") or ""
-                link = f"https://uma.komoejoy.com/news_detail.html?id={news_id}"
+        try:
+            print(f"[Info] 前往官網: {TARGET_URL}")
+            page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)  # 等待 DOM 動態渲染完成
 
-                news_list.append({
-                    "id": news_id,
-                    "title": title,
-                    "category": category,
-                    "date": publish_time,
-                    "link": link,
-                    "image": cover_image
-                })
+            # 抓取渲染後的完整 HTML
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
 
-            if news_list:
-                print(f"[Success] GET 方式成功獲取 {len(news_list)} 則公告！")
-                return news_list
-    except Exception as e:
-        print(f"[Warn] GET 請求異常: {e}")
+            # 解析新聞列表中所有的 <a> 標籤或新聞卡片
+            # 尋找帶有 news_detail 或 id 參數的連結
+            anchors = soup.find_all("a")
+            seen_ids = set()
 
-    # 方式 B：POST 備援（部分 Komoe 網站前端採用 POST payload）
-    try:
-        print("[Info] 切換至 POST 方式請求 API...")
-        payload = {"page": 1, "pageSize": 10, "type": "all"}
-        res = requests.post(API_URL, json=payload, headers=headers, timeout=15)
-        print(f"[Info] POST 回應碼: {res.status_code}")
-        
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("data", {})
-            if isinstance(items, dict):
-                items = items.get("list", [])
-            elif not isinstance(items, list):
-                items = []
+            for a in anchors:
+                href = a.get("href", "")
+                text = a.get_text(strip=True)
 
-            for item in items:
-                news_id = str(item.get("id") or item.get("news_id") or "")
-                if not news_id:
-                    continue
-                title = item.get("title", "無標題")
-                category = item.get("category_name") or item.get("type_name") or "遊戲"
-                publish_time = item.get("publish_time") or item.get("date") or ""
-                cover_image = item.get("cover") or item.get("image") or ""
-                link = f"https://uma.komoejoy.com/news_detail.html?id={news_id}"
+                if "id=" in href or "detail" in href:
+                    news_id = href.split("id=")[-1] if "id=" in href else href
+                    if news_id in seen_ids or not text:
+                        continue
+                    seen_ids.add(news_id)
 
-                news_list.append({
-                    "id": news_id,
-                    "title": title,
-                    "category": category,
-                    "date": publish_time,
-                    "link": link,
-                    "image": cover_image
-                })
+                    link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
+                    
+                    news_list.append({
+                        "id": str(news_id),
+                        "title": text,
+                        "category": "遊戲公告",
+                        "date": "",
+                        "link": link,
+                        "image": ""
+                    })
 
-            if news_list:
-                print(f"[Success] POST 方式成功獲取 {len(news_list)} 則公告！")
-                return news_list
-    except Exception as e:
-        print(f"[Warn] POST 請求異常: {e}")
+            print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
+
+        except Exception as e:
+            print(f"[Error] Playwright 執行失敗: {e}")
+        finally:
+            browser.close()
 
     return news_list
 
 
 def send_discord_webhook(news):
-    """傳送 Discord Rich Embed 卡片"""
     embed = {
         "title": news["title"],
         "url": news["link"],
-        "color": 15822180,  # 賽馬娘官方粉色
+        "color": 15822180,  # 賽馬娘品牌粉色
         "author": {
             "name": f"【{news['category']}】賽馬娘 Pretty Derby 最新公告",
             "icon_url": "https://uma.komoejoy.com/favicon.ico"
         },
-        "fields": [],
         "footer": {
             "text": "賽馬娘繁中版公告自動推播"
         }
     }
 
-    if news["date"]:
-        embed["fields"].append({
-            "name": "📅 發布時間",
-            "value": news["date"],
-            "inline": True
-        })
-
-    if news["image"]:
-        embed["image"] = {"url": news["image"]}
-
     payload = {"embeds": [embed]}
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已成功推播至 DC: [{news['category']}] {news['title']}")
+        print(f"[Success] 已推播至 DC: {news['title']}")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
@@ -168,19 +111,19 @@ def send_discord_webhook(news):
 
 def main():
     if not WEBHOOK_URL:
-        print("[Fatal] 未偵測到 DISCORD_WEBHOOK 環境變數。")
+        print("[Fatal] 未設定 DISCORD_WEBHOOK 環境變數。")
         sys.exit(1)
 
     sent_history = load_sent_history()
-    news_list = fetch_latest_news()
+    news_list = fetch_latest_news_with_playwright()
 
     if not news_list:
-        print("[Warn] 暫時無法獲取官方公告，程式正常結束。")
-        return  # 💡 改為 return 正常結束，避免 Actions 報錯標紅
+        print("[Warn] 仍未抓取到任何資料，結束執行。")
+        return
 
     new_posts_found = False
 
-    # 從舊到新推播
+    # 從舊到新順序推播
     for news in reversed(news_list):
         if news["id"] not in sent_history:
             if send_discord_webhook(news):
