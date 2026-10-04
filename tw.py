@@ -36,14 +36,43 @@ def save_sent_history(sent_set):
         json.dump(list(sent_set), f, ensure_ascii=False, indent=2)
 
 
+def clean_title_text(raw_text):
+    """徹底清除『遊戲』、『系統』及『年月日時間』等干擾文字，僅保留真實標題"""
+    if not raw_text:
+        return ""
+
+    # 清除「遊戲」、「系統」、「公告」等分類開頭文字
+    cleaned = re.sub(r"^(遊戲|系統|重要|公告|活動)\s*", "", raw_text.strip())
+    
+    # 清除「2026年10月04日 04:00」或「2026/10/04 04:00」等日期時間格式
+    cleaned = re.sub(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}\s*", "", cleaned)
+    
+    # 清除尾巴的「詳情請點擊此處」或按鈕文字
+    cleaned = cleaned.replace("詳情請點擊此處", "").replace(">>", "").strip()
+
+    # 處理可能重複換行造成的殘餘
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    
+    # 過濾掉只剩下「遊戲」或日期的行
+    final_lines = []
+    for line in lines:
+        if line in ["遊戲", "系統", "重要", "公告", "活動"]:
+            continue
+        if re.match(r"^\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}$", line):
+            continue
+        final_lines.append(line)
+
+    return " ".join(final_lines).strip()
+
+
 def clean_content_text(text, pure_title):
     """清理多餘空行、網頁導覽雜訊並平滑斷句"""
     if not text:
         return ""
 
     noise_patterns = [
-        r"News", r"最新消息", r"Top", r"遊戲", 
-        r"詳情請點擊此處", r"遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}"
+        r"News", r"最新消息", r"Top", r"^遊戲$", r"^系統$", 
+        r"詳情請點擊此處", r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}:\d{2}"
     ]
     
     lines = text.splitlines()
@@ -79,7 +108,7 @@ def fetch_latest_news_with_playwright():
             print(f"[Info] 前往官網列表: {TARGET_URL}")
             page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
             
-            # 【關鍵】滾動頁面觸發圖片 Lazy Loading，確保高清大圖完成渲染
+            # 滾動頁面確保圖片與內容渲染完畢
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(2000)
             page.evaluate("window.scrollTo(0, 0)")
@@ -93,20 +122,16 @@ def fetch_latest_news_with_playwright():
                     
                     links.forEach(a => {
                         const href = a.getAttribute('href');
-                        // 找到該條目最精準的卡片外框 (通常是 <li> 或帶有特定 class 的區塊)
                         let container = a.closest('li') || a.closest('.news-item') || a.parentElement;
                         if (!container) container = a;
 
                         let foundImg = '';
 
-                        // 1. 搜尋卡片內的 <img> 標籤，並過濾掉尺寸過小者 (排斥小 Icon、Logo)
+                        // 1. 搜尋卡片內的 <img> 標籤
                         const imgs = Array.from(container.querySelectorAll('img'));
                         for (let img of imgs) {
                             let src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
-                            
-                            // 排除標誌、Icon 與圖示
                             if (src && !src.includes('logo') && !src.includes('favicon') && !src.includes('icon')) {
-                                // 檢查圖片渲染後的真實寬度/自然寬度
                                 const width = img.clientWidth || img.naturalWidth || 0;
                                 if (width > 100 || width === 0) { 
                                     foundImg = src;
@@ -152,21 +177,20 @@ def fetch_latest_news_with_playwright():
 
             for item in cards_data:
                 href = item["href"]
-                text = item["text"]
+                raw_text = item["text"]
                 card_img = item["card_img"]
 
                 news_id = href.split("id=")[-1] if "id=" in href else href
-                if news_id in seen_ids or not text:
+                if news_id in seen_ids or not raw_text:
                     continue
                 seen_ids.add(news_id)
 
                 link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
                 
-                # 清理標題
-                pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
-                pure_title = pure_title.replace("詳情請點擊此處", "").strip()
+                # 徹底清洗標題，去除「遊戲」、「2026年10月04日 04:00」等字樣
+                pure_title = clean_title_text(raw_text)
 
-                # 補全完整圖片 URL
+                # 補全圖片網址
                 final_img = ""
                 if card_img:
                     if card_img.startswith("http"):
@@ -178,7 +202,7 @@ def fetch_latest_news_with_playwright():
 
                 news_list.append({
                     "id": str(news_id),
-                    "title": pure_title if pure_title else text,
+                    "title": pure_title,
                     "link": link,
                     "image": final_img,
                     "description": ""
@@ -210,7 +234,7 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    print(f"[Debug] 公告 [{news['title'][:12]}...] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (帶入預設大圖)'}")
+                    print(f"[Debug] 乾淨標題 ➔ [{news['title']}]")
 
                 except Exception as err:
                     print(f"[Warn] 內頁摘要抓取跳過 ({news['id']}): {err}")
@@ -242,14 +266,14 @@ def send_discord_webhook(news):
     else:
         embed["description"] = "點擊標題查看詳細公告..."
 
+    # 【關鍵修正】移除了 outer content 訊息，避免在嵌入框上方多跳一行純文字標題與時間
     payload = {
-        "content": news["title"],
         "embeds": [embed]
     }
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已推播至 DC: {news['title']} (使用圖片: {img_url})")
+        print(f"[Success] 已推播至 DC: {news['title']}")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
