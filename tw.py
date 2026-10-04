@@ -10,8 +10,8 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 設定您提供的圖床連結做為備用圖片
-DEFAULT_IMAGE_URL = "https://duk.tw/Xaqm2l/p"
+# 設定為您 duk.tw 圖床的直接圖片連結 (.png)
+DEFAULT_IMAGE_URL = "https://duk.tw/Xaqm2l.png"
 
 
 def load_sent_history():
@@ -145,7 +145,7 @@ def fetch_latest_news_with_playwright():
                         else:
                             news["description"] = cleaned
 
-                    # 嘗試抓取內頁公告的專屬圖片，若沒有則套用指定的圖片網址
+                    # 嘗試抓取內頁公告專屬圖片，若無則帶入 duk.tw 的直連圖
                     if not news["image"]:
                         content_img = detail_soup.find("img")
                         if content_img and content_img.get("src"):
@@ -170,7 +170,7 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
-    # 確保無圖片時必定帶入設定的圖床網址
+    # 確保無專屬圖片時帶入指定的大圖
     img_url = news.get("image") if news.get("image") else DEFAULT_IMAGE_URL
 
     embed = {
