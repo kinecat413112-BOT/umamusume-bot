@@ -10,7 +10,7 @@ WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 TARGET_URL = "https://uma.komoejoy.com/news?t=all"
 
-# 備用圖片：僅在官網內文完全沒有圖片（或只有 Loading 圖）時使用
+# 備用圖片：當列表頁面的卡片本身沒有圖片時使用
 DEFAULT_IMAGE_URL = "https://i.postimg.cc/7Lm5Djnr/1b74775aa80028684f67edf5e2432f38743f648f313513a1b24813b41074eb8a.jpg"
 
 
@@ -79,46 +79,79 @@ def fetch_latest_news_with_playwright():
             page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
 
-            soup = BeautifulSoup(page.content(), "html.parser")
-            anchors = soup.find_all("a")
+            # 1. 在列表頁面直接分析 DOM 卡片元素
+            # 透過 Playwright 抓取列表頁的所有新聞區塊及其內部的 img 圖片與連結
+            cards_data = page.evaluate("""
+                () => {
+                    const results = [];
+                    // 尋找列表頁上的新聞連結
+                    const links = Array.from(document.querySelectorAll('a[href*="detail"], a[href*="id="]'));
+                    
+                    links.forEach(a => {
+                        const href = a.getAttribute('href');
+                        // 找到該卡片區塊容器 (向上尋找最近的卡片或父級容器)
+                        const container = a.closest('li') || a.closest('div') || a;
+                        // 檢查卡片內部是否有 Banner 圖片
+                        const img = container.querySelector('img');
+                        const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+                        const text = a.innerText || container.innerText;
+
+                        if (href) {
+                            results.push({
+                                href: href,
+                                text: text,
+                                card_img: imgSrc
+                            });
+                        }
+                    });
+                    return results;
+                }
+            """)
+
             seen_ids = set()
 
-            for a in anchors:
-                href = a.get("href", "")
-                text = a.get_text(strip=True)
+            for item in cards_data:
+                href = item["href"]
+                text = item["text"]
+                card_img = item["card_img"]
 
-                if "id=" in href or "detail" in href:
-                    news_id = href.split("id=")[-1] if "id=" in href else href
-                    if news_id in seen_ids or not text:
-                        continue
-                    seen_ids.add(news_id)
+                news_id = href.split("id=")[-1] if "id=" in href else href
+                if news_id in seen_ids or not text:
+                    continue
+                seen_ids.add(news_id)
 
-                    link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
-                    
-                    pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
-                    pure_title = pure_title.replace("詳情請點擊此處", "").strip()
+                link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
+                
+                # 整理乾淨的標題
+                pure_title = re.sub(r"^遊戲\d{4}年\d{2}月\d{2}日 \d{2}:\d{2}\s*", "", text)
+                pure_title = pure_title.replace("詳情請點擊此處", "").strip()
 
-                    news_list.append({
-                        "id": str(news_id),
-                        "title": pure_title if pure_title else text,
-                        "link": link,
-                        "image": "",
-                        "description": ""
-                    })
+                # 排除非 Banner 的系統雜圖 (如 logo, icon 等)
+                final_card_img = ""
+                if card_img and not any(k in card_img.lower() for k in ["logo", "icon", "nav", "loading", "btn"]):
+                    final_card_img = card_img
 
-            print(f"[Success] 成功解析出 {len(news_list)} 則公告！")
+                news_list.append({
+                    "id": str(news_id),
+                    "title": pure_title if pure_title else text,
+                    "link": link,
+                    "image": final_card_img, # 這是列表頁抓到的 Banner
+                    "description": ""
+                })
 
-            # 進入內頁抓取摘要與圖片
+            print(f"[Success] 成功從列表頁解析出 {len(news_list)} 則公告！")
+
+            # 2. 進入內頁「只抓取文字」，完全不抓圖片
             for news in news_list[:5]:
                 try:
                     detail_page = context.new_page()
-                    detail_page.goto(news["link"], wait_until="networkidle", timeout=20000)
+                    detail_page.goto(news["link"], wait_until="domcontentloaded", timeout=15000)
+                    detail_page.wait_for_timeout(2000)
                     
-                    # 多等待 3 秒讓 Loading 遮罩消失與文章內容載入完成
-                    detail_page.wait_for_timeout(3000)
-
-                    # 1. 抓取文字摘要
                     detail_soup = BeautifulSoup(detail_page.content(), "html.parser")
+                    detail_page.close()
+
+                    # 清除干擾標籤
                     for s in detail_soup(["script", "style", "nav", "header", "footer"]):
                         s.extract()
 
@@ -133,43 +166,10 @@ def fetch_latest_news_with_playwright():
                         cleaned = clean_content_text(raw_text, news["title"])
                         news["description"] = cleaned[:147] + "..." if len(cleaned) > 150 else cleaned
 
-                    # 2. 由 Playwright DOM 提取所有 img 屬性
-                    img_srcs = detail_page.evaluate("""
-                        () => {
-                            const imgs = Array.from(document.querySelectorAll('img'));
-                            return imgs.map(img => img.src || img.getAttribute('data-src') || '').filter(Boolean);
-                        }
-                    """)
-
-                    detail_page.close()
-
-                    # 篩選出真正的公告 Banner 圖（徹底排除 Loading 及選單圖）
-                    found_img = ""
-                    ignore_keywords = [
-                        "logo", "icon", "nav", "btn", "share", "avatar", 
-                        "footer", "header", "favicon", "loading", "loader", "load"
-                    ]
-
-                    for src in img_srcs:
-                        src_lower = src.lower()
-                        
-                        # 1. 排除關鍵字（含有 loading、logo、icon 等）
-                        if any(k in src_lower for k in ignore_keywords):
-                            continue
-                        
-                        # 2. 排除 GIF 動圖（因為 Loading 圖皆為 GIF）
-                        if src_lower.endswith(".gif") or ".gif?" in src_lower:
-                            continue
-
-                        # 符合非 GIF 的靜態大圖（.png / .jpg / .jpeg / .webp）即採用
-                        found_img = src
-                        break
-
-                    news["image"] = found_img
-                    print(f"[Debug] 公告 [{news['title'][:10]}] 抓到圖片 ➔ {found_img if found_img else '無圖片 (套用預設大圖)'}")
+                    print(f"[Debug] 公告 [{news['title'][:10]}] 列表卡片圖片 ➔ {news['image'] if news['image'] else '無圖片 (將使用預設圖)'}")
 
                 except Exception as err:
-                    print(f"[Warn] 內頁摘要/圖片抓取跳過 ({news['id']}): {err}")
+                    print(f"[Warn] 內頁摘要抓取跳過 ({news['id']}): {err}")
 
         except Exception as e:
             print(f"[Error] Playwright 執行失敗: {e}")
@@ -182,6 +182,7 @@ def fetch_latest_news_with_playwright():
 def send_discord_webhook(news):
     """發送 Discord 推播"""
 
+    # 如果列表卡片有圖就用卡片的圖，沒圖則自動帶入預設圖片
     img_url = news.get("image", "").strip()
     if not img_url or not img_url.startswith("http"):
         img_url = DEFAULT_IMAGE_URL
@@ -205,7 +206,7 @@ def send_discord_webhook(news):
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已推播至 DC: {news['title']} (圖片: {img_url})")
+        print(f"[Success] 已推播至 DC: {news['title']} (使用圖片: {img_url})")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
