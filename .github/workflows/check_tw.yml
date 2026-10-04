@@ -1,4 +1,4 @@
-name: Check Uma Musume TW News
+name: 賽馬娘繁體中文公告通知
 
 on:
   repository_dispatch:
