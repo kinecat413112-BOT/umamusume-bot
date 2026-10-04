@@ -2,11 +2,11 @@ name: Check Uma Musume TW News
 
 on:
   repository_dispatch:
-    types: [check_tw_news] # cron-job.org 觸發用事件
-  workflow_dispatch:        # 手動測試觸發
+    types: [check_tw_news]
+  workflow_dispatch:
 
 permissions:
-  contents: write           # 賦予自動 Commit & Push last_news.json 的權限
+  contents: write
 
 jobs:
   check-and-notify:
@@ -24,7 +24,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
 
       - name: Run tw.py
         env:
