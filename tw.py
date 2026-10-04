@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK")
 DATA_FILE = "last_news.json"
 
-# 賽馬娘繁中版官方新聞網址與 API
 NEWS_PAGE_URL = "https://uma.komoejoy.com/news?t=all"
 API_URL = "https://uma.komoejoy.com/api/news/list"
 
@@ -32,73 +31,89 @@ def save_sent_history(sent_set):
 
 
 def fetch_latest_news():
-    """爬取最新公告列表 (優先透過 API，失敗則回退至 HTML 解析)"""
+    """爬取最新公告列表"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": NEWS_PAGE_URL,
-        "Accept": "application/json, text/plain, */*"
+        "Referer": "https://uma.komoejoy.com/",
+        "Origin": "https://uma.komoejoy.com",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     }
 
-    # 嘗試策略 1：呼叫官網 API
+    news_list = []
+
+    # 嘗試策略 1：呼叫 API
     try:
+        print("[Info] 嘗試呼叫官方 API...")
         response = requests.get(API_URL, params={"page": 1, "pageSize": 10, "type": "all"}, headers=headers, timeout=10)
+        print(f"[Info] API 回應狀態碼: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
             items = data.get("data", {})
             if isinstance(items, dict):
                 items = items.get("list", [])
-            
-            if items:
-                news_list = []
-                for item in items:
-                    news_id = str(item.get("id") or item.get("news_id"))
-                    title = item.get("title", "無標題")
-                    category = item.get("category_name", "遊戲")
-                    publish_time = item.get("publish_time") or item.get("date") or ""
-                    cover_image = item.get("cover") or item.get("image") or ""
-                    link = f"https://uma.komoejoy.com/news_detail.html?id={news_id}"
+            elif isinstance(items, list):
+                pass
+            else:
+                items = []
 
-                    news_list.append({
-                        "id": news_id,
-                        "title": title,
-                        "category": category,
-                        "date": publish_time,
-                        "link": link,
-                        "image": cover_image
-                    })
+            for item in items:
+                news_id = str(item.get("id") or item.get("news_id") or "")
+                if not news_id:
+                    continue
+                title = item.get("title", "無標題")
+                category = item.get("category_name") or item.get("type_name") or "遊戲"
+                publish_time = item.get("publish_time") or item.get("date") or item.get("created_at") or ""
+                cover_image = item.get("cover") or item.get("image") or ""
+                link = f"https://uma.komoejoy.com/news_detail.html?id={news_id}"
+
+                news_list.append({
+                    "id": news_id,
+                    "title": title,
+                    "category": category,
+                    "date": publish_time,
+                    "link": link,
+                    "image": cover_image
+                })
+
+            if news_list:
+                print(f"[Success] 成功從 API 抓取到 {len(news_list)} 則公告！")
                 return news_list
     except Exception as e:
-        print(f"[Info] API 讀取未順利完成，切換至 HTML 解析模式: {e}")
+        print(f"[Warn] API 抓取失敗: {e}")
 
-    # 嘗試策略 2：HTML 靜態解析備援
+    # 嘗試策略 2：HTML DOM 解析備援
     try:
+        print("[Info] 切換至 HTML 靜態抓取...")
         response = requests.get(NEWS_PAGE_URL, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         
-        news_list = []
-        for item in soup.select(".news-list-item, .news-item"):
-            link_tag = item.select_one("a") or item
-            link = link_tag.get("href", "")
-            news_id = link.split("id=")[-1] if "id=" in link else link
-            title = item.select_one(".title").get_text(strip=True) if item.select_one(".title") else "無標題"
-            category = item.select_one(".category, .tag").get_text(strip=True) if item.select_one(".category, .tag") else "遊戲"
-            
-            if news_id and link:
-                if not link.startswith("http"):
-                    link = f"https://uma.komoejoy.com{link}"
-                news_list.append({
-                    "id": str(news_id),
-                    "title": title,
-                    "category": category,
-                    "date": "",
-                    "link": link,
-                    "image": ""
-                })
-        return news_list
+        # 尋找頁面上的連結與區塊
+        for a_tag in soup.find_all("a"):
+            href = a_tag.get("href", "")
+            if "id=" in href or "detail" in href:
+                news_id = href.split("id=")[-1] if "id=" in href else href
+                title = a_tag.get_text(strip=True) or "賽馬娘最新公告"
+                if len(title) > 2:
+                    link = href if href.startswith("http") else f"https://uma.komoejoy.com{href}"
+                    news_list.append({
+                        "id": str(news_id),
+                        "title": title,
+                        "category": "遊戲",
+                        "date": "",
+                        "link": link,
+                        "image": ""
+                    })
+
+        if news_list:
+            print(f"[Success] 成功從 HTML 抓取到 {len(news_list)} 則公告！")
+            return news_list
     except Exception as e:
         print(f"[Error] HTML 解析失敗: {e}")
-        return []
+
+    return news_list
 
 
 def send_discord_webhook(news):
@@ -106,7 +121,7 @@ def send_discord_webhook(news):
     embed = {
         "title": news["title"],
         "url": news["link"],
-        "color": 15822180,  # 賽馬娘官方粉色 (#F170A4)
+        "color": 15822180,  # 賽馬娘官方粉色
         "author": {
             "name": f"【{news['category']}】賽馬娘 Pretty Derby 最新公告",
             "icon_url": "https://uma.komoejoy.com/favicon.ico"
@@ -131,7 +146,7 @@ def send_discord_webhook(news):
 
     res = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     if res.status_code in [200, 204]:
-        print(f"[Success] 已推播: [{news['category']}] {news['title']}")
+        print(f"[Success] 已成功推播至 DC: [{news['category']}] {news['title']}")
         return True
     else:
         print(f"[Error] Webhook 推播失敗 ({res.status_code}): {res.text}")
@@ -147,12 +162,12 @@ def main():
     news_list = fetch_latest_news()
 
     if not news_list:
-        print("[Info] 未獲取到任何公告。")
-        return
+        print("[Error] 完全未獲取到任何公告資料，請檢查 API 或網址是否異動。")
+        sys.exit(1)
 
     new_posts_found = False
 
-    # 反轉列表順序（從舊到新推播），確保 Discord 頻道內訊息排序正確
+    # 從舊到新推播
     for news in reversed(news_list):
         if news["id"] not in sent_history:
             if send_discord_webhook(news):
@@ -163,7 +178,7 @@ def main():
         save_sent_history(sent_history)
         print("[Info] 已更新 last_news.json 歷史紀錄。")
     else:
-        print("[Info] 沒有發現新公告。")
+        print("[Info] 沒有發現新公告（所有公告皆已推播過）。")
 
 
 if __name__ == "__main__":
